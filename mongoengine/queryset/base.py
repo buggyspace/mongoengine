@@ -899,6 +899,7 @@ class BaseQuerySet(object):
         .. versionchanged:: 0.5 - Added subfield support
         """
         fields = {f: QueryFieldList.ONLY for f in fields}
+        self._cursor_obj = None
         self.only_fields = fields.keys()
         return self.fields(True, **fields)
 
