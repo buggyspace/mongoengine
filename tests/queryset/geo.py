@@ -57,6 +57,18 @@ class GeoQueriesTest(MongoDBTestCase):
         self.assertEqual(events.count(), 3)
         self.assertEqual(list(events), [event3, event1, event2])
 
+    def test_near_and_aggregate(self):
+        """Test "near" operator and aggregation pipeline"""
+
+        event1, event2, event3 = self._create_event_data()
+        pipeline = [
+            {"$group": {"_id": None, "count": {"$sum": 1}}}
+        ]
+
+        events = self.Event.objects(location__near=[-87.67892, 41.9120459])
+        aggregation_result = list(events.aggregate(*pipeline))
+        self.assertEqual(aggregation_result, [{"_id": None, "count": 3}])
+
     def test_near_and_max_distance(self):
         """Ensure the "max_distance" operator works alongside the "near"
         operator.
