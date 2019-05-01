@@ -5,6 +5,7 @@ from bson.dbref import DBRef
 import pymongo
 from pymongo.read_preferences import ReadPreference
 import six
+from six import iteritems
 
 from mongoengine import signals
 from mongoengine.base import (BaseDict, BaseDocument, BaseList,
@@ -17,7 +18,7 @@ from mongoengine.context_managers import (set_write_concern,
                                           switch_db)
 from mongoengine.errors import (InvalidDocumentError, InvalidQueryError,
                                 SaveConditionError)
-from mongoengine.python_support import IS_PYMONGO_3
+from mongoengine.pymongo_support import IS_PYMONGO_3, list_collection_names
 from mongoengine.queryset import (NotUniqueError, OperationError,
                                   QuerySet, transform)
 
@@ -90,9 +91,15 @@ class EmbeddedDocument(six.with_metaclass(DocumentMetaclass, BaseDocument)):
         return data
 
     def save(self, *args, **kwargs):
+        warnings.warn("EmbeddedDocument.save is deprecated and will be removed in a next version of mongoengine."
+                      "Use the parent document's .save() or ._instance.save()",
+                      DeprecationWarning, stacklevel=2)
         self._instance.save(*args, **kwargs)
 
     def reload(self, *args, **kwargs):
+        warnings.warn("EmbeddedDocument.reload is deprecated and will be removed in a next version of mongoengine."
+                      "Use the parent document's .reload() or ._instance.reload()",
+                      DeprecationWarning, stacklevel=2)
         self._instance.reload(*args, **kwargs)
 
 
@@ -181,10 +188,16 @@ class Document(six.with_metaclass(TopLevelDocumentMetaclass, BaseDocument)):
         return get_db(cls._meta.get('db_alias', DEFAULT_CONNECTION_NAME))
 
     @classmethod
-    def _get_collection(cls):
-        """Return a PyMongo collection for the document."""
-        if not hasattr(cls, '_collection') or cls._collection is None:
+    def _disconnect(cls):
+        """Detach the Document class from the (cached) database collection"""
+        cls._collection = None
 
+    @classmethod
+    def _get_collection(cls):
+        """Return the corresponding PyMongo collection of this document.
+        Upon the first call, it will ensure that indexes gets created. The returned collection then gets cached
+        """
+        if not hasattr(cls, '_collection') or cls._collection is None:
             # Get the collection, either capped or regular.
             if cls._meta.get('max_size') or cls._meta.get('max_documents'):
                 cls._collection = cls._get_capped_collection()
@@ -221,7 +234,7 @@ class Document(six.with_metaclass(TopLevelDocumentMetaclass, BaseDocument)):
 
         # If the collection already exists and has different options
         # (i.e. isn't capped or has different max/size), raise an error.
-        if collection_name in db.collection_names():
+        if collection_name in list_collection_names(db, include_system_collections=True):
             collection = db[collection_name]
             options = collection.options()
             if (
@@ -444,16 +457,6 @@ class Document(six.with_metaclass(TopLevelDocumentMetaclass, BaseDocument)):
 
             object_id = wc_collection.insert_one(doc).inserted_id
 
-        # In PyMongo 3.0, the save() call calls internally the _update() call
-        # but they forget to return the _id value passed back, therefore getting it back here
-        # Correct behaviour in 2.X and in 3.0.1+ versions
-        if not object_id and pymongo.version_tuple == (3, 0):
-            pk_as_mongo_obj = self._fields.get(self._meta['id_field']).to_mongo(self.pk)
-            object_id = (
-                self._qs.filter(pk=pk_as_mongo_obj).first() and
-                self._qs.filter(pk=pk_as_mongo_obj).first().pk
-            )  # TODO doesn't this make 2 queries?
-
         return object_id
 
     def _get_update_doc(self):
@@ -607,7 +610,7 @@ class Document(six.with_metaclass(TopLevelDocumentMetaclass, BaseDocument)):
 
         # Delete FileFields separately
         FileField = _import_class('FileField')
-        for name, field in self._fields.iteritems():
+        for name, field in iteritems(self._fields):
             if isinstance(field, FileField):
                 getattr(self, name).delete()
 
@@ -792,13 +795,13 @@ class Document(six.with_metaclass(TopLevelDocumentMetaclass, BaseDocument)):
         .. versionchanged:: 0.10.7
             :class:`OperationError` exception raised if no collection available
         """
-        col_name = cls._get_collection_name()
-        if not col_name:
+        coll_name = cls._get_collection_name()
+        if not coll_name:
             raise OperationError('Document %s has no collection defined '
                                  '(is it abstract ?)' % cls)
         cls._collection = None
         db = cls._get_db()
-        db.drop_collection(col_name)
+        db.drop_collection(coll_name)
 
     @classmethod
     def create_index(cls, keys, background=False, **kwargs):
@@ -1016,7 +1019,7 @@ class DynamicDocument(six.with_metaclass(TopLevelDocumentMetaclass, Document)):
 
     .. note::
 
-        There is one caveat on Dynamic Documents: fields cannot start with `_`
+        There is one caveat on Dynamic Documents: undeclared fields cannot start with `_`
     """
 
     # The __metaclass__ attribute is removed by 2to3 when running with Python3

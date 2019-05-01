@@ -4,12 +4,15 @@ import os
 import pickle
 import unittest
 import uuid
+import warnings
 import weakref
-
 from datetime import datetime
+
 from bson import DBRef, ObjectId
 from pymongo.errors import DuplicateKeyError
+from six import iteritems
 
+from mongoengine.pymongo_support import list_collection_names
 from tests import fixtures
 from tests.fixtures import (PickleEmbedded, PickleTest, PickleSignalsTest,
                             PickleDynamicEmbedded, PickleDynamicTest)
@@ -53,9 +56,7 @@ class InstanceTest(MongoDBTestCase):
         self.Job = Job
 
     def tearDown(self):
-        for collection in self.db.collection_names():
-            if 'system.' in collection:
-                continue
+        for collection in list_collection_names(self.db):
             self.db.drop_collection(collection)
 
     def assertDbEqual(self, docs):
@@ -570,7 +571,7 @@ class InstanceTest(MongoDBTestCase):
 
         Post.drop_collection()
 
-        Post._get_collection().insert({
+        Post._get_collection().insert_one({
             "title": "Items eclipse",
             "items": ["more lorem", "even more ipsum"]
         })
@@ -804,7 +805,8 @@ class InstanceTest(MongoDBTestCase):
         doc2 = self.Person(name="jim", age=20).save()
         docs = [dict(doc1.to_mongo()), dict(doc2.to_mongo())]
 
-        assert not doc1.modify({'name': doc2.name}, set__age=100)
+        n_modified = doc1.modify({'name': doc2.name}, set__age=100)
+        self.assertEqual(n_modified, 0)
 
         self.assertDbEqual(docs)
 
@@ -813,7 +815,8 @@ class InstanceTest(MongoDBTestCase):
         doc2 = self.Person(id=ObjectId(), name="jim", age=20)
         docs = [dict(doc1.to_mongo())]
 
-        assert not doc2.modify({'name': doc2.name}, set__age=100)
+        n_modified = doc2.modify({'name': doc2.name}, set__age=100)
+        self.assertEqual(n_modified, 0)
 
         self.assertDbEqual(docs)
 
@@ -829,14 +832,15 @@ class InstanceTest(MongoDBTestCase):
         doc.job.name = "Google"
         doc.job.years = 3
 
-        assert doc.modify(
+        n_modified = doc.modify(
             set__age=21, set__job__name="MongoDB", unset__job__years=True)
+        self.assertEqual(n_modified, 1)
         doc_copy.age = 21
         doc_copy.job.name = "MongoDB"
         del doc_copy.job.years
 
-        assert doc.to_json() == doc_copy.to_json()
-        assert doc._get_changed_fields() == []
+        self.assertEqual(doc.to_json(), doc_copy.to_json())
+        self.assertEqual(doc._get_changed_fields(), [])
 
         self.assertDbEqual([dict(other_doc.to_mongo()), dict(doc.to_mongo())])
 
@@ -1482,7 +1486,7 @@ class InstanceTest(MongoDBTestCase):
         Message.drop_collection()
 
         # All objects share the same id, but each in a different collection
-        user = User(id=1, name='user-name')#.save()
+        user = User(id=1, name='user-name')  # .save()
         message = Message(id=1, author=user).save()
 
         message.author.name = 'tutu'
@@ -1999,7 +2003,6 @@ class InstanceTest(MongoDBTestCase):
 
         child_record.delete()
         self.assertEqual(Record.objects(name='parent').get().children, [])
-
 
     def test_reverse_delete_rule_with_custom_id_field(self):
         """Ensure that a referenced document with custom primary key
@@ -2757,7 +2760,7 @@ class InstanceTest(MongoDBTestCase):
 
         User.drop_collection()
 
-        User._get_collection().save({
+        User._get_collection().insert_one({
             'name': 'John',
             'foo': 'Bar',
             'data': [1, 2, 3]
@@ -2773,7 +2776,7 @@ class InstanceTest(MongoDBTestCase):
 
         User.drop_collection()
 
-        User._get_collection().save({
+        User._get_collection().insert_one({
             'name': 'John',
             'foo': 'Bar',
             'data': [1, 2, 3]
@@ -2796,7 +2799,7 @@ class InstanceTest(MongoDBTestCase):
 
         User.drop_collection()
 
-        User._get_collection().save({
+        User._get_collection().insert_one({
             'name': 'John',
             'thing': {
                 'name': 'My thing',
@@ -2819,7 +2822,7 @@ class InstanceTest(MongoDBTestCase):
 
         User.drop_collection()
 
-        User._get_collection().save({
+        User._get_collection().insert_one({
             'name': 'John',
             'thing': {
                 'name': 'My thing',
@@ -2842,7 +2845,7 @@ class InstanceTest(MongoDBTestCase):
 
         User.drop_collection()
 
-        User._get_collection().save({
+        User._get_collection().insert_one({
             'name': 'John',
             'thing': {
                 'name': 'My thing',
@@ -3059,7 +3062,7 @@ class InstanceTest(MongoDBTestCase):
 
             def expand(self):
                 self.flattened_parameter = {}
-                for parameter_name, parameter in self.parameters.iteritems():
+                for parameter_name, parameter in iteritems(self.parameters):
                     parameter.expand()
 
         class NodesSystem(Document):
@@ -3067,7 +3070,7 @@ class InstanceTest(MongoDBTestCase):
             nodes = MapField(ReferenceField(Node, dbref=False))
 
             def save(self, *args, **kwargs):
-                for node_name, node in self.nodes.iteritems():
+                for node_name, node in iteritems(self.nodes):
                     node.expand()
                     node.save(*args, **kwargs)
                 super(NodesSystem, self).save(*args, **kwargs)
@@ -3085,6 +3088,24 @@ class InstanceTest(MongoDBTestCase):
         self.assertEqual(
             "UNDEFINED",
             system.nodes["node"].parameters["param"].macros["test"].value)
+
+    def test_embedded_document_save_reload_warning(self):
+        """Relates to #1570"""
+        class Embedded(EmbeddedDocument):
+            pass
+
+        class Doc(Document):
+            emb = EmbeddedDocumentField(Embedded)
+
+        doc = Doc(emb=Embedded()).save()
+        doc.emb.save()  # Make sure its still working
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            with self.assertRaises(DeprecationWarning):
+                doc.emb.save()
+
+            with self.assertRaises(DeprecationWarning):
+                doc.emb.reload()
 
     def test_embedded_document_equality(self):
         class Test(Document):
@@ -3195,8 +3216,7 @@ class InstanceTest(MongoDBTestCase):
         coll = Person._get_collection()
         for person in Person.objects.as_pymongo():
             if 'height' not in person:
-                person['height'] = 189
-                coll.save(person)
+                coll.update_one({'_id': person['_id']}, {'$set': {'height': 189}})
 
         self.assertEquals(Person.objects(height=189).count(), 1)
 
@@ -3380,7 +3400,6 @@ class InstanceTest(MongoDBTestCase):
 
         class User(Document):
             company = ReferenceField(Company)
-
 
         # Ensure index creation exception aren't swallowed (#1688)
         with self.assertRaises(DuplicateKeyError):

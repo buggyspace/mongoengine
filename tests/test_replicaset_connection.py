@@ -2,7 +2,7 @@ import unittest
 
 from pymongo import ReadPreference
 
-from mongoengine.python_support import IS_PYMONGO_3
+from mongoengine.pymongo_support import IS_PYMONGO_3
 
 if IS_PYMONGO_3:
     from pymongo import MongoClient
@@ -46,6 +46,7 @@ class ConnectionTest(unittest.TestCase):
             return
 
         self.assertEqual(conn.read_preference, READ_PREF)
+
 
 if __name__ == '__main__':
     unittest.main()

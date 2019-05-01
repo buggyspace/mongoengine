@@ -12,18 +12,17 @@ from pymongo.errors import ConfigurationError
 from pymongo.read_preferences import ReadPreference
 from pymongo.results import UpdateResult
 import six
+from six import iteritems
 
 from mongoengine import *
 from mongoengine.connection import get_connection, get_db
 from mongoengine.context_managers import query_counter, switch_db
 from mongoengine.errors import InvalidQueryError
-from mongoengine.python_support import IS_PYMONGO_3
+from mongoengine.mongodb_support import get_mongodb_version, MONGODB_32
+from mongoengine.pymongo_support import IS_PYMONGO_3
 from mongoengine.queryset import (DoesNotExist, MultipleObjectsReturned,
                                   QuerySet, QuerySetManager, queryset_manager)
-
-from tests.utils import requires_mongodb_gte_26, skip_pymongo3, get_mongodb_version, MONGODB_32
-
-__all__ = ("QuerySetTest",)
+from tests.utils import requires_mongodb_gte_26, skip_pymongo3
 
 
 class db_ops_tracker(query_counter):
@@ -394,6 +393,16 @@ class QuerySetTest(unittest.TestCase):
         qs = A.objects.batch_size(-1)
         with self.assertRaises(ValueError):
             list(qs)
+
+    def test_batch_size_cloned(self):
+        class A(Document):
+            s = StringField()
+
+        # test that batch size gets cloned
+        qs = A.objects.batch_size(5)
+        self.assertEqual(qs._batch_size, 5)
+        qs_clone = qs.clone()
+        self.assertEqual(qs_clone._batch_size, 5)
 
     def test_update_write_concern(self):
         """Test that passing write_concern works"""
@@ -851,8 +860,8 @@ class QuerySetTest(unittest.TestCase):
             self.assertEqual(q, 0)
             Blog.objects.insert(blogs, load_bulk=False)
 
-            if MONGO_VER == MONGODB_32:
-                self.assertEqual(q, 1)              # 1 entry containing the list of inserts
+            if MONGO_VER >= MONGODB_32:
+                self.assertEqual(q, 1)      # 1 entry containing the list of inserts
             else:
                 self.assertEqual(q, len(blogs))     # 1 entry per doc inserted
 
@@ -868,8 +877,8 @@ class QuerySetTest(unittest.TestCase):
             self.assertEqual(q, 0)
             Blog.objects.insert(blogs)
 
-            if MONGO_VER == MONGODB_32:
-                self.assertEqual(q, 2)                  # 1 for insert 1 for fetch
+            if MONGO_VER >= MONGODB_32:
+                self.assertEqual(q, 2)              # 1 for insert 1 for fetch
             else:
                 self.assertEqual(q, len(blogs)+1)       # + 1 to fetch all docs
 
@@ -1203,7 +1212,7 @@ class QuerySetTest(unittest.TestCase):
         """Ensure filters can be chained together.
         """
         class Blog(Document):
-            id = StringField(unique=True, primary_key=True)
+            id = StringField(primary_key=True)
 
         class BlogPost(Document):
             blog = ReferenceField(Blog)
@@ -1315,7 +1324,7 @@ class QuerySetTest(unittest.TestCase):
         order_by() w/o any arguments.
         """
         MONGO_VER = self.mongodb_version
-        ORDER_BY_KEY = 'sort' if MONGO_VER == MONGODB_32 else '$orderby'
+        ORDER_BY_KEY = 'sort' if MONGO_VER >= MONGODB_32 else '$orderby'
 
         class BlogPost(Document):
             title = StringField()
@@ -2233,6 +2242,19 @@ class QuerySetTest(unittest.TestCase):
         bar.reload()
         self.assertEqual(len(bar.foos), 0)
 
+    def test_update_one_check_return_with_full_result(self):
+        class BlogTag(Document):
+            name = StringField(required=True)
+
+        BlogTag.drop_collection()
+
+        BlogTag(name='garbage').save()
+        default_update = BlogTag.objects.update_one(name='new')
+        self.assertEqual(default_update, 1)
+
+        full_result_update = BlogTag.objects.update_one(name='new', full_result=True)
+        self.assertIsInstance(full_result_update, UpdateResult)
+
     def test_update_one_pop_generic_reference(self):
 
         class BlogTag(Document):
@@ -2510,8 +2532,8 @@ class QuerySetTest(unittest.TestCase):
     def test_comment(self):
         """Make sure adding a comment to the query gets added to the query"""
         MONGO_VER = self.mongodb_version
-        QUERY_KEY = 'filter' if MONGO_VER == MONGODB_32 else '$query'
-        COMMENT_KEY = 'comment' if MONGO_VER == MONGODB_32 else '$comment'
+        QUERY_KEY = 'filter' if MONGO_VER >= MONGODB_32 else '$query'
+        COMMENT_KEY = 'comment' if MONGO_VER >= MONGODB_32 else '$comment'
 
         class User(Document):
             age = IntField()
@@ -3335,7 +3357,7 @@ class QuerySetTest(unittest.TestCase):
             meta = {'indexes': [
                 {'fields': ['$title', "$content"],
                  'default_language': 'portuguese',
-                 'weight': {'title': 10, 'content': 2}
+                 'weights': {'title': 10, 'content': 2}
                  }
             ]}
 
@@ -4026,7 +4048,7 @@ class QuerySetTest(unittest.TestCase):
         info = [(value['key'],
                  value.get('unique', False),
                  value.get('sparse', False))
-                for key, value in info.iteritems()]
+                for key, value in iteritems(info)]
         self.assertIn(([('_cls', 1), ('message', 1)], False, False), info)
 
     def test_where(self):
@@ -4037,7 +4059,7 @@ class QuerySetTest(unittest.TestCase):
             fielda = IntField()
             fieldb = IntField()
 
-        IntPair.objects._collection.remove()
+        IntPair.drop_collection()
 
         a = IntPair(fielda=1, fieldb=1)
         b = IntPair(fielda=1, fieldb=2)
@@ -4580,9 +4602,6 @@ class QuerySetTest(unittest.TestCase):
         self.assertEqual(doc_objects, Doc.objects.from_json(json_data))
 
     def test_json_complex(self):
-        if pymongo.version_tuple[0] <= 2 and pymongo.version_tuple[1] <= 3:
-            raise SkipTest("Need pymongo 2.4 as has a fix for DBRefs")
-
         class EmbeddedDoc(EmbeddedDocument):
             pass
 
@@ -4628,14 +4647,12 @@ class QuerySetTest(unittest.TestCase):
         self.assertEqual(doc_objects, Doc.objects.from_json(json_data))
 
     def test_as_pymongo(self):
-        from decimal import Decimal
-
         class LastLogin(EmbeddedDocument):
             location = StringField()
             ip = StringField()
 
         class User(Document):
-            id = ObjectIdField('_id')
+            id = StringField(primary_key=True)
             name = StringField()
             age = IntField()
             price = DecimalField()
@@ -4643,9 +4660,10 @@ class QuerySetTest(unittest.TestCase):
 
         User.drop_collection()
 
-        User.objects.create(name="Bob Dole", age=89, price=Decimal('1.11'))
+        User.objects.create(id='Bob', name="Bob Dole", age=89, price=Decimal('1.11'))
         User.objects.create(
-            name="Barack Obama",
+            id='Barak',
+            name="Barak Obama",
             age=51,
             price=Decimal('2.22'),
             last_login=LastLogin(
@@ -4673,7 +4691,7 @@ class QuerySetTest(unittest.TestCase):
         self.assertIsInstance(results[1], dict)
         self.assertEqual(results[0]['name'], 'Bob Dole')
         self.assertEqual(results[0]['price'], 1.11)
-        self.assertEqual(results[1]['name'], 'Barack Obama')
+        self.assertEqual(results[1]['name'], 'Barak Obama')
         self.assertEqual(results[1]['price'], 2.22)
 
         users = User.objects.only('name', 'last_login').as_pymongo()
@@ -4681,15 +4699,35 @@ class QuerySetTest(unittest.TestCase):
         self.assertIsInstance(results[0], dict)
         self.assertIsInstance(results[1], dict)
         self.assertEqual(results[0], {
+            '_id': 'Bob',
             'name': 'Bob Dole'
         })
         self.assertEqual(results[1], {
-            'name': 'Barack Obama',
+            '_id': 'Barak',
+            'name': 'Barak Obama',
             'last_login': {
                 'location': 'White House',
                 'ip': '104.107.108.116'
             }
         })
+
+    def test_as_pymongo_returns_cls_attribute_when_using_inheritance(self):
+        class User(Document):
+            name = StringField()
+            meta = {'allow_inheritance': True}
+
+        User.drop_collection()
+
+        user = User(name="Bob Dole").save()
+        result = User.objects.as_pymongo().first()
+        self.assertEqual(
+            result,
+            {
+                '_cls': 'User',
+                '_id': user.id,
+                'name': 'Bob Dole'
+            }
+        )
 
     def test_as_pymongo_json_limit_fields(self):
 
@@ -4706,19 +4744,27 @@ class QuerySetTest(unittest.TestCase):
 
         serialized_user = User.objects.exclude(
             'password_salt', 'password_hash').as_pymongo()[0]
-        self.assertEqual(set(['_id', 'email']), set(serialized_user.keys()))
+        self.assertEqual({'_id', 'email'}, set(serialized_user.keys()))
 
         serialized_user = User.objects.exclude(
             'id', 'password_salt', 'password_hash').to_json()
         self.assertEqual('[{"email": "ross@example.com"}]', serialized_user)
 
-        serialized_user = User.objects.exclude(
-            'password_salt').only('email').as_pymongo()[0]
-        self.assertEqual(set(['email']), set(serialized_user.keys()))
+        serialized_user = User.objects.only('email').as_pymongo()[0]
+        self.assertEqual({'_id', 'email'}, set(serialized_user.keys()))
 
         serialized_user = User.objects.exclude(
-            'password_salt').only('email').to_json()
-        self.assertEqual('[{"email": "ross@example.com"}]', serialized_user)
+            'password_salt').only('email').as_pymongo()[0]
+        self.assertEqual({'_id', 'email'}, set(serialized_user.keys()))
+
+        serialized_user = User.objects.exclude(
+            'password_salt', 'id').only('email').as_pymongo()[0]
+        self.assertEqual({'email'}, set(serialized_user.keys()))
+
+        serialized_user = User.objects.exclude(
+            'password_salt', 'id').only('email').to_json()
+        self.assertEqual('[{"email": "ross@example.com"}]',
+                         serialized_user)
 
     def test_only_after_count(self):
         """Test that only() works after count()"""
@@ -4728,19 +4774,19 @@ class QuerySetTest(unittest.TestCase):
             age = IntField()
             address = StringField()
         User.drop_collection()
-        User(name="User", age=50,
-             address="Moscow, Russia").save()
+        user = User(name="User", age=50,
+                    address="Moscow, Russia").save()
 
         user_queryset = User.objects(age=50)
 
         result = user_queryset.only("name", "age").as_pymongo().first()
-        self.assertEqual(result, {"name": "User", "age": 50})
+        self.assertEqual(result, {"_id": user.id, "name": "User", "age": 50})
 
         result = user_queryset.count()
         self.assertEqual(result, 1)
 
         result = user_queryset.only("name", "age").as_pymongo().first()
-        self.assertEqual(result, {"name": "User", "age": 50})
+        self.assertEqual(result, {"_id": user.id, "name": "User", "age": 50})
 
     def test_no_dereference(self):
 
@@ -5090,7 +5136,7 @@ class QuerySetTest(unittest.TestCase):
     def test_query_reference_to_custom_pk_doc(self):
 
         class A(Document):
-            id = StringField(unique=True, primary_key=True)
+            id = StringField(primary_key=True)
 
         class B(Document):
             a = ReferenceField(A)
@@ -5195,7 +5241,7 @@ class QuerySetTest(unittest.TestCase):
 
     def test_bool_with_ordering(self):
         MONGO_VER = self.mongodb_version
-        ORDER_BY_KEY = 'sort' if MONGO_VER == MONGODB_32 else '$orderby'
+        ORDER_BY_KEY = 'sort' if MONGO_VER >= MONGODB_32 else '$orderby'
 
         class Person(Document):
             name = StringField()
@@ -5266,13 +5312,9 @@ class QuerySetTest(unittest.TestCase):
         Person.drop_collection()
 
         p1 = Person(name="Isabella Luanna", age=16)
-        p1.save()
-
         p2 = Person(name="Wilson Junior", age=21)
-        p2.save()
-
         p3 = Person(name="Sandra Mara", age=37)
-        p3.save()
+        Person.objects.insert([p1, p2, p3])
 
         data = Person.objects(age__lte=22).aggregate(
             {'$project': {'name': {'$toUpper': '$name'}}}
@@ -5301,6 +5343,186 @@ class QuerySetTest(unittest.TestCase):
         })
         self.assertEqual(list(data), [
             {'_id': None, 'avg': 29, 'total': 2}
+        ])
+
+    @requires_mongodb_gte_26
+    def test_queryset_aggregation_with_skip(self):
+        class Person(Document):
+            name = StringField()
+            age = IntField()
+
+        Person.drop_collection()
+
+        p1 = Person(name="Isabella Luanna", age=16)
+        p2 = Person(name="Wilson Junior", age=21)
+        p3 = Person(name="Sandra Mara", age=37)
+        Person.objects.insert([p1, p2, p3])
+
+        data = Person.objects.skip(1).aggregate(
+            {'$project': {'name': {'$toUpper': '$name'}}}
+        )
+
+        self.assertEqual(list(data), [
+            {'_id': p2.pk, 'name': "WILSON JUNIOR"},
+            {'_id': p3.pk, 'name': "SANDRA MARA"}
+        ])
+
+    @requires_mongodb_gte_26
+    def test_queryset_aggregation_with_limit(self):
+        class Person(Document):
+            name = StringField()
+            age = IntField()
+
+        Person.drop_collection()
+
+        p1 = Person(name="Isabella Luanna", age=16)
+        p2 = Person(name="Wilson Junior", age=21)
+        p3 = Person(name="Sandra Mara", age=37)
+        Person.objects.insert([p1, p2, p3])
+
+        data = Person.objects.limit(1).aggregate(
+            {'$project': {'name': {'$toUpper': '$name'}}}
+        )
+
+        self.assertEqual(list(data), [
+            {'_id': p1.pk, 'name': "ISABELLA LUANNA"}
+        ])
+
+    @requires_mongodb_gte_26
+    def test_queryset_aggregation_with_sort(self):
+        class Person(Document):
+            name = StringField()
+            age = IntField()
+
+        Person.drop_collection()
+
+        p1 = Person(name="Isabella Luanna", age=16)
+        p2 = Person(name="Wilson Junior", age=21)
+        p3 = Person(name="Sandra Mara", age=37)
+        Person.objects.insert([p1, p2, p3])
+
+        data = Person.objects.order_by('name').aggregate(
+            {'$project': {'name': {'$toUpper': '$name'}}}
+        )
+
+        self.assertEqual(list(data), [
+            {'_id': p1.pk, 'name': "ISABELLA LUANNA"},
+            {'_id': p3.pk, 'name': "SANDRA MARA"},
+            {'_id': p2.pk, 'name': "WILSON JUNIOR"}
+        ])
+
+    @requires_mongodb_gte_26
+    def test_queryset_aggregation_with_skip_with_limit(self):
+        class Person(Document):
+            name = StringField()
+            age = IntField()
+
+        Person.drop_collection()
+
+        p1 = Person(name="Isabella Luanna", age=16)
+        p2 = Person(name="Wilson Junior", age=21)
+        p3 = Person(name="Sandra Mara", age=37)
+        Person.objects.insert([p1, p2, p3])
+
+        data = list(
+            Person.objects.skip(1).limit(1).aggregate(
+            {'$project': {'name': {'$toUpper': '$name'}}}
+            )
+        )
+
+        self.assertEqual(list(data), [
+            {'_id': p2.pk, 'name': "WILSON JUNIOR"},
+        ])
+
+        # Make sure limit/skip chaining order has no impact
+        data2 = Person.objects.limit(1).skip(1).aggregate(
+            {'$project': {'name': {'$toUpper': '$name'}}}
+        )
+
+        self.assertEqual(data, list(data2))
+
+    @requires_mongodb_gte_26
+    def test_queryset_aggregation_with_sort_with_limit(self):
+        class Person(Document):
+            name = StringField()
+            age = IntField()
+
+        Person.drop_collection()
+
+        p1 = Person(name="Isabella Luanna", age=16)
+        p2 = Person(name="Wilson Junior", age=21)
+        p3 = Person(name="Sandra Mara", age=37)
+        Person.objects.insert([p1, p2, p3])
+
+        data = Person.objects.order_by('name').limit(2).aggregate(
+            {'$project': {'name': {'$toUpper': '$name'}}}
+        )
+
+        self.assertEqual(list(data), [
+            {'_id': p1.pk, 'name': "ISABELLA LUANNA"},
+            {'_id': p3.pk, 'name': "SANDRA MARA"}
+        ])
+
+        # Verify adding limit/skip steps works as expected
+        data = Person.objects.order_by('name').limit(2).aggregate(
+            {'$project': {'name': {'$toUpper': '$name'}}},
+            {'$limit': 1},
+        )
+
+        self.assertEqual(list(data), [
+            {'_id': p1.pk, 'name': "ISABELLA LUANNA"},
+        ])
+
+        data = Person.objects.order_by('name').limit(2).aggregate(
+            {'$project': {'name': {'$toUpper': '$name'}}},
+            {'$skip': 1},
+            {'$limit': 1},
+        )
+
+        self.assertEqual(list(data), [
+            {'_id': p3.pk, 'name': "SANDRA MARA"},
+        ])
+
+    @requires_mongodb_gte_26
+    def test_queryset_aggregation_with_sort_with_skip(self):
+        class Person(Document):
+            name = StringField()
+            age = IntField()
+
+        Person.drop_collection()
+
+        p1 = Person(name="Isabella Luanna", age=16)
+        p2 = Person(name="Wilson Junior", age=21)
+        p3 = Person(name="Sandra Mara", age=37)
+        Person.objects.insert([p1, p2, p3])
+
+        data = Person.objects.order_by('name').skip(2).aggregate(
+            {'$project': {'name': {'$toUpper': '$name'}}}
+        )
+
+        self.assertEqual(list(data), [
+            {'_id': p2.pk, 'name': "WILSON JUNIOR"}
+        ])
+
+    @requires_mongodb_gte_26
+    def test_queryset_aggregation_with_sort_with_skip_with_limit(self):
+        class Person(Document):
+            name = StringField()
+            age = IntField()
+
+        Person.drop_collection()
+
+        p1 = Person(name="Isabella Luanna", age=16)
+        p2 = Person(name="Wilson Junior", age=21)
+        p3 = Person(name="Sandra Mara", age=37)
+        Person.objects.insert([p1, p2, p3])
+
+        data = Person.objects.order_by('name').skip(1).limit(1).aggregate(
+            {'$project': {'name': {'$toUpper': '$name'}}}
+        )
+
+        self.assertEqual(list(data), [
+            {'_id': p3.pk, 'name': "SANDRA MARA"}
         ])
 
     def test_delete_count(self):
@@ -5345,7 +5567,7 @@ class QuerySetTest(unittest.TestCase):
 
         Person.drop_collection()
 
-        Person._get_collection().insert({'name': 'a', 'id': ''})
+        Person._get_collection().insert_one({'name': 'a', 'id': ''})
         for p in Person.objects():
             self.assertEqual(p.name, 'a')
 
